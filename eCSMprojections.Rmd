@@ -1,0 +1,978 @@
+---
+title: "eCSM projections"
+author: "Sigurd Maurud"
+date: "2025-05-10"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 5
+    latex_engine: xelatex
+    keep_tex: yes
+  word_document:
+    toc: yes
+    toc_depth: '4'
+geometry: margin=1in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Integrate Python in R Markdown 
+
+```{r}
+library(reticulate)
+use_python("C:/Program Files/Python312/python.exe", required = TRUE)
+```
+
+# 1. Text preparations and wrangling
+
+Load data
+
+```{python}
+from docx import Document
+
+# Function to read text files from file path
+def load_transcripts(path):
+  transcript = Document(path) # create transcript object 
+  text = [] # initalise list for storing text
+  for paragraph in transcript.paragraphs: # iterate over paragraphs
+    if paragraph.text.strip(): # Omit empty paragraphs
+      text.append(paragraph.text) # Append text to intialised list
+  return ' '.join(text) # Return the combined text and paragraphs
+
+# Define file path for all 17 interview transcripts
+paths = [
+    "Interviews/Raw files/Transcript 1.docx",
+    "Interviews/Raw files/Transcript 2.docx",
+    "Interviews/Raw files/Transcript 3.docx",
+    "Interviews/Raw files/Transcript 4.docx",
+    "Interviews/Raw files/Transcript 5.docx",
+    "Interviews/Raw files/Transcript 6.docx",
+    "Interviews/Raw files/Transcript 7.docx",
+    "Interviews/Raw files/Transcript 8.docx",
+    "Interviews/Raw files/Transcript 9.docx",
+    "Interviews/Raw files/Transcript 10.docx",
+    "Interviews/Raw files/Transcript 11.docx",
+    "Interviews/Raw files/Transcript 12.docx",
+    "Interviews/Raw files/Transcript 13.docx",
+    "Interviews/Raw files/Transcript 15.docx",
+    "Interviews/Raw files/Transcript 17.docx",
+    "Interviews/Raw files/Transcript 18.docx",
+    "Interviews/Raw files/Transcript 20.docx"]
+
+# Load transcripts and store them in a list
+transcripts = [] # initialise list for storing transcripts
+for path in paths: # iterate over file paths
+  transcript_text = load_transcripts(path)
+  transcripts.append(transcript_text)
+
+print(f'Number of transcripts:\n{len(transcripts)}')
+```
+
+Import JSON list of defined corrections and list of stopwords (secure environment allows limited internet access) 
+
+```{python}
+import json
+import pickle
+
+with open('corrections.json', 'r', encoding='utf-8') as file:
+  corrections = json.load(file)
+
+with open('stopwords.pkl', 'rb') as f:
+  stopwords = pickle.load(f)
+```
+
+Tokenise text, remove special characters, lowercase letters, correct misspellings and remove stopwords. 
+
+```{python}
+import nltk
+nltk.data.path.append('nltk_data') # Local import of NLTK functionality
+from nltk.tokenize import sent_tokenize, word_tokenize
+import re
+from collections import Counter
+
+# 1. Tokenise text into sentence tokens and word tokens 
+sent_tokens = []
+word_tokens = []
+
+# Sentence tokens 
+for transcript in transcripts:
+  sentences = sent_tokenize(transcript, language='norwegian')
+  sent_tokens.extend(sentences)
+
+# Word tokens 
+for transcript in transcripts:
+  words = word_tokenize(transcript, language='norwegian')
+  word_tokens.extend(words)
+
+# Total vocabulary
+vocabulary = Counter(word_tokens)
+
+# 2. Function to remove special characters
+
+def remove_special_characters(text, remove_digits=False):
+# Regular expression. ^ equals negation: "all that is not" letters and whitespace (\s)
+    pattern = r'[^a-zA-ZæøåÆØÅ0-9\s]' if not remove_digits else r'[^a-zA-ZæøåÆØÅ\s]'  
+# Replace all special characters and numbers that match pattern with empty string
+    text = re.sub(pattern, '', text)
+    return text
+  
+# Remove special characters
+clean_word_tokens = [remove_special_characters(token, remove_digits=True) for 
+token in word_tokens]
+clean_sent_tokens = [remove_special_characters(token, remove_digits=True) for 
+token in sent_tokens]
+
+# 3. Lowercase text
+
+def lowercase(tokens):
+  return [token.lower() for token in tokens]
+
+clean_word_tokens = lowercase(clean_word_tokens)
+clean_sent_tokens = lowercase(clean_sent_tokens)
+
+# 4. Define function for correcting misspellings
+
+def correct_spelling(text, correction_map):
+  # Tokenise sentence tokens into words
+    words = nltk.word_tokenize(text.lower(), language='norwegian')
+    corrected_words = []# Initialise list for corrected text
+
+    for word in words:
+      # Replace misspellings with corrections
+        corrected_word = correction_map.get(word, word) 
+        if ' ' in corrected_word:
+          # Split corrections consisting of several words into independent words 
+            corrected_words.extend(corrected_word.split(' ')) 
+        else:
+            corrected_words.append(corrected_word)
+    
+    return ' '.join(corrected_words)
+
+# Correct misspellings
+clean_sent_tokens = [correct_spelling(sentence, corrections) for 
+sentence in clean_sent_tokens]
+clean_word_tokens = [correct_spelling(word, corrections) for 
+word in clean_word_tokens]
+
+# 5. Define function to remove stopwords
+def remove_stopwords(sentence):
+    word_list = sentence.split()
+    # Filter stopwords
+    no_stopwords = [word for word in word_list if word not in stopwords] 
+    return ' '.join(no_stopwords)
+
+# Remove stopwords
+clean_sent_tokens = [remove_stopwords(sentence) for sentence in clean_sent_tokens]
+no_stopword_tokens = [word_tokenize(sentence) for sentence in clean_sent_tokens]
+clean_word_tokens = [word for sublist in no_stopword_tokens for word in sublist]
+clean_vocabulary = Counter(clean_word_tokens)
+
+# 6. Inspect
+print(f'Total number of sentences:\n {len(sent_tokens)}')
+print(f'Total number of words:\n {len(word_tokens)}')
+print(f'Total number of independent words:\n {len(vocabulary)}')
+print(f'Total number of clean sentences:\n {len(clean_sent_tokens)}')
+print(f'Total number of words with stopwords omitted:\n{len(clean_word_tokens)}')
+print(f'Total number of independent words with stopwords omitted:\n{len(clean_vocabulary)}')
+```
+
+Convert clean sentence tokens into data frame
+
+```{python}
+import pandas as pd
+
+sents_df = pd.DataFrame({'Sentence': clean_sent_tokens})
+print('Number of rows and columns in dataframe: \n', sents_df.shape, '\n')
+```
+
+Vectorise data frame into frequency-based Bag of Words (BoW)
+
+```{python}
+from sklearn.feature_extraction.text import CountVectorizer
+import numpy as np
+
+# Create Count vectoriser object that considers unigrams and bigrams
+cv = CountVectorizer(ngram_range=(1,2))
+# Train BoW on unigram and bigram vocabulary and create sparse matrix
+bow = cv.fit_transform(sents_df['Sentence'])
+# Convert BoW to numpy array
+bow_matrix = bow.toarray()
+# Get vocabulary from BoW
+bow_vocab = cv.get_feature_names_out()
+# Convert to Data Frame for inspection
+bow_df = pd.DataFrame(np.round(bow_matrix, 2), columns=bow_vocab)
+print(f'Number of rows and columns in data frame:\n{bow_df.shape}')
+print('First five rows of data frame: ') 
+print(bow_df.head)
+```
+
+# 2. Topic model - Non-negative matrix factorisation 
+
+Compute coherence $C_v$ for different number of topics
+
+```{python}
+from sklearn.decomposition import NMF
+from gensim.corpora.dictionary import Dictionary
+from gensim.models.coherencemodel import CoherenceModel
+
+# Define different numbers of topics to assess
+num_topics = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
+
+# Initialise list for coherence scores
+coherence_cv = []
+
+# Set up Gensim dictionary of vocabulary for computing coherence 
+gensimDictionary = Dictionary(no_stopword_tokens)
+# Create Gensim BoW corpus for computing coherence 
+corpus = [gensimDictionary.doc2bow(doc) for doc in no_stopword_tokens]
+
+for n_topics in num_topics:
+  # Train NMF with specified parameters
+  nmf = NMF(n_components=n_topics, solver='cd', max_iter=1000, random_state=42)
+  nmf.fit(bow_matrix)
+  topic_terms = nmf.components_ # Extract topics
+  
+  # Extract top 10 topic words 
+  topics = []
+  for topic_idx, topic in enumerate(topic_terms):
+    # last 10 indices in descending order
+    topic_words = [bow_vocab[i] for i in topic.argsort()[:-10 - 1:-1]] 
+    topics.append(topic_words)
+  # Compute coherence for model topics based on top 10 words 
+  coherence_model = CoherenceModel(topics=topics, texts=no_stopword_tokens, 
+  dictionary=gensimDictionary, coherence='c_v')
+  # Store results 
+  coherence_cv.append(coherence_model.get_coherence())
+```
+
+Assess coherence for different number of topics
+
+```{python}
+list = num_topics
+for num_topics, coherence in zip(list,coherence_cv):
+    print(f"Number of topics: {num_topics}, Coherence score C_v: {coherence}")
+```
+
+Train NMF with 28 topics
+
+```{python}
+# Define number of topics
+n_topics = 28
+# Train NMF and define V, W, and H matrices
+V = bow_matrix
+nmf = NMF(n_components=n_topics, solver='cd', max_iter=1000, random_state=42)
+W = nmf.fit_transform(V)
+H = nmf.components_ 
+feature_names = bow_vocab
+
+# Build data frame with top 10 words for each topic
+topic_key_terms_idx = np.argsort(-np.absolute(H), axis=1)[:, :10]
+# Sort top 10 indices for each topic in descending weights 
+topic_keyterms = feature_names[topic_key_terms_idx] # Name each indices by their word
+# Combine keyterms for each topic in a string
+topics = [', '.join(topic) for topic in topic_keyterms] 
+# Create data frame with indexation for each topic
+Topics_df = pd.DataFrame(
+  topics, columns=['Terms per Topic'], 
+  index=['Topic'+str(i) for i in range(1, n_topics+1)]
+  ) 
+```
+
+Visualise top 10 words for each topic
+
+```{r}
+# Export data frame to R
+Topics <- py_to_r(py$Topics_df)
+# Ensure data frame is a data frame
+Topics <- as.data.frame(Topics)
+# Print
+knitr::kable(Topics)
+```
+
+Export Topics data frame and sentence tokens for semantic assessment of each topic
+
+```{python}
+with open('sent_tokens.pkl', 'wb') as f:
+  pickle.dump(sent_tokens, f)
+
+Topics_df.to_csv("Topics.csv", index=True, header=True)
+```
+
+Transfer matrix W to R
+
+```{r, fig.width=12, fig.height=8, message=FALSE}
+library(dplyr)
+# Transfer W matrix
+W1 <- py_to_r(py$W)
+# Transform W1 to dataframe
+W1 <- as.data.frame(W1)
+# Name topics based on identified content 
+W1 <- W1 %>%
+  rename_at(vars(1:28), ~ c("1. Information needs in current offer",
+                            "2. Living with IBD",
+                            "3. Digital content and services",
+                            "4. Bad periods and concerns", 
+                            "5. Disease understanding",
+                            "6. IBD help line",
+                            "7. Existing sources of information",
+                            "8. Health service communication and follow-up",
+                            "9. Health information: availability and quality",
+                            "10. Possibilities in digitisation",
+                            "11. Medicine information",
+                            "12. Abstinence and healthy habits",
+                            "13. Nutrition", 
+                            "14. Information access before and now",
+                            "15. Symptoms: frequency and intensity",
+                            "16. Primary care",
+                            "17. Manage daily living",
+                            "18. Wishes for information and services",
+                            "19. Iron deficiency",
+                            "20. Information exchange with HCP",
+                            "21. Symptoms and affiliated ailments",
+                            "22. Effect of medicines",
+                            "23. Contact with the health service",
+                            "24. Identifying the disease",
+                            "25. Diet",
+                            "26. Internet and search engines",
+                            "27. Challenges in information 
+                            retrieval and needs assessment",
+                            "28. Digitisation as driver for 
+                            active patient involvement"))
+```
+
+# 3. Project free-text responses to topic model
+
+Load data
+
+```{r}
+HL_DHL <- read.csv2('HLDHL.data.csv')
+# Combine the three Brief IPQ free-text responses into one variable 
+BIPQ9 <- paste(HL_DHL$BIPQ9_1, HL_DHL$BIPQ9_2, HL_DHL$BIPQ9_3, sep = " ")
+# Transfer to Python for text analysis
+py$BIPQ9 <- BIPQ9
+```
+
+Define additional corrections for identified words in free-text responses
+
+```{python}
+corrections_2 = {
+  "abbruk": "antibiotika bruk",
+  "fam": "familie",
+  "stresstraumalivssituasjon": "stress traume livssituasjon",
+  "arvdisponert": "arv disponert",
+  "virusinfeksjonbakterie": "virus infeksjon bakterie",
+  "seksueltvoldelig": "seksuelt voldelig",
+  "depresjonangst": "depresjon angst",
+  "bechterews": "bekhterevs",
+  "arvgenetisk": "arv genetisk",
+  "laaang": "lang",
+  "genetikkarv": "genetikk arv", 
+  "arvgener": "arv gener",
+  "tetracyckin": "tetracyklin",
+  "sovn": "søvn",
+  "overthinking": "overtenking",
+  "mtp": "med tanke på", 
+  "osv": "og så videre",
+  "sundt": "sunt",
+  "røket": "røyket",
+  "mnd": "måned",
+  "giftforgiftet": "gift forgiftet",
+  "arveligfarmor": "arvelig farmor",
+  "stressangst": "stress angst",
+  "feks": "for eksempel",
+  "bectrews": "bekhterevs",
+  "imunsystem": "immunsystem",
+  "uc": "ulcerøs kolitt",
+  "bakteriematmijlø": "bakterie mat miljø",
+  "emotionell": "emosjonell",
+  "adhdautisme": "adhd autisme",
+  "milj": "miljø",
+  "mtp": "med tanke på",
+  "hyper prosessert": "hyperprosessert",
+  "hemorider": "hemoroider",
+  "livstill": "livsstil",
+  "uflaksgener": "uflaks gener",
+  "forstyrretpåvirket": "forstyrret påvirket",
+  "ikkr": "ikke",
+  "arvmiljøtilfeldig": "arv miljø tilfeldig",
+  "svingingerpubertet": "svingninger pubertet",
+  "svakedårlige": "svake dårlige",
+  "arveliggenetisk": "arvelig genetisk",
+  "stressjobbensomhet": "stress jobb ensomhet",
+  "gut": "tarm",
+  "bacteria": "bakterie",
+  "distribution": "distribusjon",
+  "genetic": "genetisk",
+  "ultraprossesert": "ultraprosessert",
+  "div": "diverse",
+  "stresstraumer": "stress traumer",
+  "kostholdlivsstil": "kosthold livsstil",
+  "el": "eller",
+  "rsaken": "årsaken"}
+```
+
+Predict free-text responses to NMF topics
+
+```{python, message=FALSE, warning=FALSE}
+# Word tokens of free-text responses
+words_BIPQ9 = []
+for obs in BIPQ9:
+  words = word_tokenize(obs, language='norwegian')
+  words_BIPQ9.extend(words)
+
+vocab_BIPQ9 = Counter(words_BIPQ9)
+
+# Preprocess and wrangle text from free-text responses 
+clean_BIPQ9 = [remove_special_characters(token, remove_digits=True) for token in BIPQ9]
+clean_BIPQ9 = lowercase(clean_BIPQ9)
+clean_BIPQ9 = [correct_spelling(sentence, corrections) for sentence in clean_BIPQ9]
+clean_BIPQ9 = [correct_spelling(sentence, corrections_2) for sentence in clean_BIPQ9]
+clean_BIPQ9 = [remove_stopwords(sentence) for sentence in clean_BIPQ9]
+
+# Word tokens of clean free-text responses
+
+words_clean_BIPQ9 = []
+for obs in clean_BIPQ9:
+  words = word_tokenize(obs, language='norwegian')
+  words_clean_BIPQ9.extend(words)
+
+vocab_clean_BIPQ9 = Counter(words_clean_BIPQ9)
+# Inspect
+print(f'Total number of observations:\n {len(BIPQ9)}')
+print(f'Total number of words:\n {len(words_BIPQ9)}')
+print(f'Total number of independent words:\n {len(vocab_BIPQ9)}')
+print(f'Total number of words with stopwords omitted:\n{len(words_clean_BIPQ9)}')
+print(f'Total number of independent words with stopwords omitted:\n{len(vocab_clean_BIPQ9)}')
+```
+
+Project topics in free-text responses
+```{python}
+BIPQ9_bow = cv.transform(clean_BIPQ9)
+BIPQ9_W = nmf.transform(BIPQ9_bow)
+```
+
+Export W matrix to R
+
+```{r}
+W2 <- py_to_r(py$BIPQ9_W)
+```
+
+Compare mean topic presence in W-matrices
+
+```{r, warning=FALSE, message=FALSE}
+W.comparance <- data.frame(
+  mean_W1 = round(colMeans(W1), digits = 4),
+  topic_presence_W1 = round((colSums(W1 > 0.01)/nrow(W1))*100, digits = 2),
+  mean_W2 = round(colMeans(W2), digits = 4),
+  topic_presence_W2 = round((colSums(W2 > 0.01)/nrow(W2))*100, digits = 2)
+)
+knitr::kable(W.comparance)
+```
+
+```{r}
+relevant.W2 <- (W.comparance$mean_W2 > W.comparance$mean_W1) &
+  (W.comparance$topic_presence_W2 > W.comparance$topic_presence_W1)
+knitr::kable(W.comparance[relevant.W2 == TRUE, ])
+```
+
+Set topic names for W2
+
+```{r}
+W2_nonames <- W2 # Save a copy of W2 without topic names for later processing
+W2 <- as.data.frame(W2)
+colnames(W2) <- colnames(W1)
+```
+
+# 4. Principal component analysis
+
+Perform PCA. Omit scaling as topics are weighted on the same scale and represent relative relationships
+
+```{r}
+pr.W <- prcomp(W2, center = TRUE, scale. = FALSE)
+summary(pr.W) # Print output
+```
+
+Plot proportion of variance explained and cumulative proportion of variance explained by each component
+
+```{r, fig.width=6, fig.height=4}
+par(mfrow = c(1, 2))
+plot(summary(pr.W)$importance[2, ], xlab = "Principal component", 
+     ylab = "Proportion of variance explained", ylim = c(0,1), 
+     type = "b")
+plot(summary(pr.W)$importance[3, ], xlab = "Principal component", 
+     ylab = "Cumulative proportion of variance explained", ylim = c(0,1), 
+     type = "b")
+```
+
+Extract the first six components from PCA to account for 90 % variance
+
+```{r}
+w.pcs <- pr.W$x[, 1:6]
+```
+
+Inspect the contribution of each topic into the components
+
+```{r}
+knitr::kable(round(pr.W$rotation[, 1:6], digits = 3))
+```
+
+# 5. Hierarchical clustering of first 6 principal components
+
+Assess agglomerative coefficient (AC) for different combinations of distances and linkages
+
+```{r, message=FALSE, warning=FALSE}
+library(cluster)
+library(proxy)
+set.seed(43) 
+
+# Define distances and linkages
+distances <- c("euclidean", "maximum", "manhattan", "canberra", "cosine")
+linkages <- c("average", "single", "complete", "ward")
+
+# Function for AC-evaluation
+clustEv <- function(dist.m, link.m) {
+  copy <- w.pcs # use copy of data to avoid interference
+  dist.m <- if (dist.m == "cosine"){ # stats::dist() does not support cosine
+    as.dist(proxy::dist(copy, method = "cosine"))
+  } else {
+    stats::dist(copy, method = dist.m) # return to integrated stats()-function
+  }
+  res.agnes <- agnes(dist.m, method = link.m)
+  return(res.agnes$ac)
+}
+
+
+res <- expand.grid(distance = distances, linkage = linkages) %>%
+  rowwise() %>%
+  mutate(ac = clustEv(distance, linkage)) %>% 
+  ungroup()
+
+# View results
+knitr::kable(res)
+```
+
+Continue with Cosine distance and complete linkage
+
+```{r, fig.width=6, fig.height=4}
+dist.cos <- proxy::dist(w.pcs, method = "cosine")
+cos.com <- hclust(dist.cos, method = "complete")
+plot(cos.com, hang = -1, cex = 0.5, main = "Cosine complete")
+```
+
+Dendrogram indicates three distinct branches. Assess Silhouette coefficient for cluster solutions.
+
+```{r, fig.width=6, fig.height=4}
+sil.k <- list()
+for (k in 2:6) {
+  clusters <- cutree(cos.com, k = k)
+  # Silhouette
+  sil.k[[k]] <- mean(cluster::silhouette(clusters, dist.cos)[, 3])
+}
+silhouette <- unlist(sil.k)
+names(silhouette) <- c(2:6)
+plot(2:6, silhouette, main = "Silhouette coefficient",
+     xlab = "Number of clusters", ylab = "Silhouette", type = "b")
+# Assess mean coefficients with different number of clusters 
+print(silhouette)
+```
+
+Assess stability of cluster solutions through bootstrapped Jaccard similarity index(JSI)
+
+```{r, warning=FALSE}
+library(fpc)
+set.seed(43)
+# Define function for fpc::clusterboot()
+CosCom <- function(x, k) {
+  dist.matrix <- dist(x, method = "cosine")
+  dist.m <- as.matrix(dist.matrix)
+  hc <- hclust(dist.matrix, method = "complete")
+  clusters <- cutree(hc, k = k)
+  clusterlist <- lapply(1:k, function(i) clusters == i)
+  list(
+    result = hc,
+    nc = k,
+    clusterlist = clusterlist,
+    partition = clusters,
+    clustermethod = "hierarchical"
+  )
+}
+
+# Compare mean JSI over bootstrap samples
+cut3 <- clusterboot(w.pcs, B = 1000, bootmethod = "boot",
+                      clustermethod = CosCom, k = 3, count = FALSE)
+cut4 <- clusterboot(w.pcs, B = 1000, bootmethod = "boot",
+                      clustermethod = CosCom, k = 4, count = FALSE)
+cut5 <- clusterboot(w.pcs, B = 1000, bootmethod = "boot",
+                      clustermethod = CosCom, k = 5, count = FALSE)
+cut6 <- clusterboot(w.pcs, B = 1000, bootmethod = "boot",
+                      clustermethod = CosCom, k = 6, count = FALSE)
+
+# View results
+cut3$bootmean
+cut4$bootmean
+cut5$bootmean
+cut6$bootmean
+```
+
+Assess cluster distribution for different solutions
+
+```{r}
+cut3 <- cutree(cos.com, k = 3)
+cut4 <- cutree(cos.com, k = 4)
+cut5 <- cutree(cos.com, k = 5)
+cut6 <- cutree(cos.com, k = 6)
+W2clusters <- mutate(as.data.frame(W2_nonames), Cluster3 = as.factor(cut3), 
+              Cluster4 = as.factor(cut4), Cluster5 = as.factor(cut5), 
+              Cluster6 = as.factor(cut6))
+summary(W2clusters$Cluster3)
+summary(W2clusters$Cluster4)
+summary(W2clusters$Cluster5)
+summary(W2clusters$Cluster6)
+```
+
+
+***Conclusion:*** *Silhouette coefficient and JSI demonstrate high values​for k = 3 up to k = 6, but at k higher than 3, small clusters are generated, posing risk of reduced interpretative value. A 3-cluster solution is indicated by the dendrogram and provides the most balanced distribution.*
+
+Merge selected clusters with corresponding observations in data
+
+```{r}
+W2c <- mutate(as.data.frame(W2_nonames), Cluster = as.factor(cut3))
+```
+
+Assess cluster profiles for topics
+
+```{r}
+topic.profiles.1 <- W2c %>%
+  group_by(Cluster) %>%
+  summarise('2. Living with IBD' = round(mean(V2), digits = 3), 
+            '2. SD' = round(sd(V2), digits = 3),
+            '2. Topic presence' = round(mean(V2 > 0) * 100, digits = 3),
+            '4. Bad periods and concerns' = round(mean(V4), digits = 3), 
+            '4. SD' = round(sd(V4), digits = 3),
+            '4. Topic presence' = round(mean(V4 > 0) * 100, digits = 3),
+            '21. Symptoms and affiliated ailments' = round(mean(V21), digits = 3), 
+            '21. SD' = round(sd(V21), digits = 3),
+            '21. Topic presence' = round(mean(V21 > 0) * 100, digits = 3),
+            '25. Diet' = round(mean(V25), digits = 3), 
+            '25. SD' = round(sd(V25), digits = 3),
+            '25. Topic presence' = round(mean(V25) * 100, digits = 3))
+# Transpose table
+topic.profiles.1 <- as.data.frame(t(topic.profiles.1))
+# Round values
+topic.profiles.2 <- as.data.frame(lapply(topic.profiles.1, 
+                                         function(x) round(as.numeric(x), 5)))
+# Give columns names
+colnames(topic.profiles.2) <- c('Cluster 1', 'Cluster 2', 'Cluster 3')
+rownames(topic.profiles.2) <- rownames(topic.profiles.1)
+# Print topic profiles
+knitr::kable(topic.profiles.2[-1,])
+```
+
+
+
+## Cluster profiles for metadata
+
+Compute EQ-5D-5L according to Norwegian value set
+
+```{r, warning=FALSE, message=FALSE}
+library(eq5d)
+# Define dimensions according to function
+scores.df <- data.frame(
+  MO = EQdimensions$EQ5D_mobility, 
+  SC = EQdimensions$EQ5D_self_care, 
+  UA = EQdimensions$EQ5D_usual_activities, 
+  PD = EQdimensions$EQ5D_pain_discomfort, 
+  AD = EQdimensions$EQ5D_anxiety_depression)
+# Compute index
+eq5d5l <- eq5d(scores.df, country = "Norway", version = "5L", 
+               type = "VT", ignore.invalid = TRUE)
+```
+
+Cluster profiles for continuous variables
+
+```{r}
+# Get continuous variables from HL/DHL data
+HL.con <- HL_DHL[, c(2, 8, 19, 25:27, 31:46)]
+real_HL <- read.csv2("N:/durable/OUS-GHsurvey/Sigurd - surveydata/Analyse/HL_DHL_data.csv")
+BIPQ18 <- real_HL[, 55:62]
+# merge data into one dataframe
+HL.con <- mutate(HL.con, EQindex = eq5d5l, Cluster = W2c$Cluster, Consequences = BIPQ18$BIPQ1, Timeline = BIPQ18$BIPQ2, Personal_control = BIPQ18$BIPQ3, Treatment_control = BIPQ18$BIPQ4, Identity = BIPQ18$BIPQ5, Concern = BIPQ18$BIPQ6, Comprehensibility = BIPQ18$BIPQ7, Emotions = BIPQ18$BIPQ8)
+# Get summaries 
+con.profiles <- HL.con %>% 
+  group_by(Cluster) %>%
+  summarise('Age' = mean(age), 
+            'SD Age' = sd(age), 
+            'Disease duration' = mean(disease_duration), 
+            'SD disease duration' = sd(disease_duration), 
+            'EQ VAS' = mean(EQ5Dvas1, na.rm = T), 
+            'SD EQ VAS' = sd(EQ5Dvas1, na.rm = T),
+            'EQ index' = mean(EQindex, na.rm = T), 
+            'SD EQ index' = sd(EQindex, na.rm = T),
+            'GSE' = mean(GSE_sum), 
+            'SD GSE' = sd(GSE_sum),
+            'Consequences' = mean(Consequences, na.rm = TRUE),
+            'SD Consequences' = sd(Consequences, na.rm = TRUE),
+            'Timeline' = mean(Timeline, na.rm = TRUE),
+            'SD timeline' = sd(Timeline, na.rm = TRUE),
+            'Personal control' = mean(Personal_control, na.rm = TRUE),
+            'SD Personal control' = sd(Personal_control, na.rm = TRUE),
+            'Treatment control' = mean(Treatment_control, na.rm = TRUE),
+            'SD Treatment control' = sd(Treatment_control, na.rm = TRUE),
+            'Identity' = mean(Identity, na.rm = TRUE),
+            'SD identity' = sd(Identity, na.rm = TRUE),
+            'Concern' = mean(Concern, na.rm = TRUE),
+            'SD concern' = sd(Concern, na.rm = TRUE),
+            'Comprehensibility' = mean(Comprehensibility, na.rm = TRUE),
+            'SD Comprehensibility' = sd(Comprehensibility, na.rm = TRUE),
+            'Emotions' = mean(Emotions, na.rm = TRUE),
+            'SD Emotions' = sd(Emotions, na.rm = TRUE),
+            'Brief IPQ' = mean(BIPQ_sum), 
+            'SD Brief IPQ' = sd(BIPQ_sum),
+            'Calprotectin' = mean(Calprotectin, na.rm = TRUE), 
+            'SD Calprotectin' = sd(Calprotectin, na.rm = TRUE),
+            'HLQ 1' = mean(HLQ.Scale1), 
+            'SD HLQ 1' = sd(HLQ.Scale1),
+            'HLQ 2' = mean(HLQ.Scale2), 
+            'SD HLQ 2' = sd(HLQ.Scale2),
+            'HLQ 3' = mean(HLQ.Scale3), 
+            'SD HLQ 3' = sd(HLQ.Scale3),
+            'HLQ 4' = mean(HLQ.Scale4), 
+            'SD HLQ 4' = sd(HLQ.Scale4),
+            'HLQ 5' = mean(HLQ.Scale5), 
+            'SD HLQ 5' = sd(HLQ.Scale5),
+            'HLQ 6' = mean(HLQ.Scale6), 
+            'SD HLQ 6' = sd(HLQ.Scale6),
+            'HLQ 7' = mean(HLQ.Scale7), 
+            'SD HLQ 7' = sd(HLQ.Scale7),
+            'HLQ 8' = mean(HLQ.Scale8), 
+            'SD HLQ 8' = sd(HLQ.Scale8),
+            'HLQ 9' = mean(HLQ.Scale9), 
+            'SD HLQ 9' = sd(HLQ.Scale9),
+            'eHLQ 1' = mean(eHLQ.Domain1), 
+            'SD eHLQ 1' = sd(eHLQ.Domain1),
+            'eHLQ 2' = mean(eHLQ.Domain2), 
+            'SD eHLQ 2' = sd(eHLQ.Domain2),
+            'eHLQ 3' = mean(eHLQ.Domain3), 
+            'SD eHLQ3' = sd(eHLQ.Domain3),
+            'eHLQ 4' = mean(eHLQ.Domain4), 
+            'SD eHLQ 4' = sd(eHLQ.Domain4),
+            'eHLQ 5' = mean(eHLQ.Domain5), 
+            'SD eHLQ 5' = sd(eHLQ.Domain5),
+            'eHLQ 6' = mean(eHLQ.Domain6), 
+            'SD eHLQ 6' = sd(eHLQ.Domain6),
+            'eHLQ 7' = mean(eHLQ.Domain7), 
+            'SD eHLQ 7' = sd(eHLQ.Domain7))
+con.profiles <- as.data.frame(t(con.profiles))
+colnames(con.profiles) <- c('Cluster 1', 'Cluster 2', 'Cluster 3')
+knitr::kable(con.profiles[-1, ])
+```
+
+Cluster profiles for categorical variables 
+
+```{r}
+HL.cat <- HL_DHL[, c(1, 3, 7, 9, 13:18, 20:24)]
+HL.cat$Cluster <- W2c$Cluster
+HL.cat$calpro <- ifelse(is.na(HL_DHL$Calprotectin), NA,
+                        ifelse(HL_DHL$Calprotectin >= 250, 1, 0))
+
+
+
+# Get sum for each category for each cluster
+cat.tbl <- HL.cat %>%
+  group_by(Cluster) %>%
+  summarise(
+    n(),
+    "Male" = sum(gender == "Male"),
+    "Female" = sum(gender == "Female"),
+    "Elementary school" = sum(education == "Elementary school", na.rm = TRUE),
+    "Secondary school" = sum(education == "Secondary school", na.rm = TRUE),
+    "University college/university ≤ 4 years" = sum(
+      education == "University college or university, up to 4 years", na.rm = TRUE),
+    "University college/university ≥ 5 years" = sum(
+      education == "University college or university, over 5 years", na.rm = TRUE), 
+    "Crohn's disease" = sum(diagnose == "Crohn's disease"),
+    "Ulcerative colitis" = sum(diagnose == "Ulcerative colitis"),
+    "Surgery" = sum(surgery == "Surgery"),
+    "Disease activity above threshold" = sum(
+      IBD_disease_activity == "Over treshold", na.rm = TRUE),
+    "Receiving treatment" = sum(treatment == "Yes"),
+    "5-ASA" = sum(ASA_5 == "Yes"),
+    "Immunosuppressive" = sum(immunosuppressive == "Yes"),
+    "Biological treatment" = sum(biological == "Yes"),
+    "Corticosteroids" = sum(corticosteroids == "Yes"),
+    "Disease activity(calprotectin)" = sum(calpro == 1, na.rm = T)
+  )
+# print summaries
+knitr::kable(as.data.frame(t(cat.tbl)))
+```
+
+## Bivariate analysis of metadata distribution across clusters 
+
+Permuted ANOVA over continuous variables
+
+```{r, message=FALSE}
+library(coin)
+set.seed(43)
+
+HL.con$Cluster <- as.factor(HL.con$Cluster)
+cols.test <- c(1:23, 25:32)
+p.values <- numeric(length(cols.test))
+for (i in seq_along(cols.test)) {
+  var.name <- HL.con[cols.test[i]]
+  formula <- as.formula(paste(var.name, "~ Cluster"))
+  perm.aov <- oneway_test(formula, data = HL.con, 
+                          distribution = approximate(nresample = 9999), 
+                          na.rm = TRUE)
+  p.values[i] <- pvalue(perm.aov)
+}
+
+corrected.p <- p.adjust(p.values, method = "BH")
+p.anov <- data.frame(
+  Name = colnames(HL.con[, c(1:23, 25:32)]),
+  Cor.P = corrected.p
+)
+knitr::kable(p.anov[corrected.p < .05, ])
+```
+
+Post-hoc for ANOVA
+
+```{r}
+anov.vars <- colnames(HL.con[, c(3, 6, 9, 10, 23, 25:26, 30, 32)])
+clusters <- unique(HL.con$Cluster)
+p.vals.T <- list()
+set.seed(43)
+
+for (i in anov.vars) {
+  var.res <- list()
+  var.p <- list()
+  for (j in 1:(length(clusters)-1)){
+    for (k in (j + 1):length(clusters)){
+      group1 <- clusters[j]
+      group2 <- clusters[k]
+      
+      test <- independence_test(as.formula(paste(i, "~ Cluster")),
+                                data = subset(HL.con, Cluster %in% c(group1, group2)),
+                                distribution = approximate(nresample = 9999))
+      name <- paste(group1, "vs.", group2)
+      var.p[[name]] <- pvalue(test)
+    }
+  }
+  p.vals.T[[i]] <- var.p
+}
+
+p.vals.T <- unlist(p.vals.T)
+
+adj.p.vals <- p.adjust(p.vals.T, method = "BH")
+
+adj.p.vals[adj.p.vals < .05]
+```
+
+Chi-square test over nominal variables
+
+```{r, warning=FALSE}
+ext.nom <- subset(HL.cat, select = c(gender, diagnose, surgery, 
+                                     IBD_disease_activity, treatment, ASA_5,
+                                     immunosuppressive, biological, corticosteroids, calpro,
+                                     Cluster))
+
+nom.vars <- names(ext.nom)
+nom.vars <- nom.vars[-11]
+
+# Create empty lists to store results
+test.stat <- list()
+p.val <- numeric()
+
+# Designate variables to Chi-square/Fisher test depending on contingency table
+
+for (i in 1:length(nom.vars)) {
+   cat.tab <- table(ext.nom[, i], ext.nom$Cluster)
+  if (any(cat.tab < 5)) {
+    fisher <- fisher.test(cat.tab, workspace = 2e8, hybrid = T)
+    test.stat[[i]] <- fisher
+    p.val[i] <- fisher$p.value
+  } else {
+    chisq <- chisq.test(cat.tab)
+    test.stat[[i]] <- chisq
+    p.val[i] <- chisq$p.value
+  }
+}
+
+# Give corresponding names in list
+names(test.stat) <- nom.vars
+
+# Adjust p-values with Hochberg correction
+adj.p <- p.adjust(p.val, method = "BH")
+
+
+# View significant results and adjusted p-value
+p.chi <- data.frame(
+  Variables = colnames(ext.nom[, -11]),
+  p.vals = adj.p
+)
+
+knitr::kable(p.chi[adj.p < .05, ])
+```
+
+Post hoc of nominal variables
+
+```{r, message=FALSE}
+library(rstatix)
+sig.noms <- ext.nom[, c(2, 3, 6, 8, 11)]
+
+# Diagnose
+diagnosis.tab <- table(sig.noms$Cluster, sig.noms$diagnose)
+dimnames(diagnosis.tab) <- list(
+  group = c("Cluster 1", "Cluster 2", "Cluster 3"),
+  Diagnosis = c("CD", "UC")
+)
+pairwise.dia <- pairwise_prop_test(diagnosis.tab)
+
+# Surgery
+surg.tab <- table(sig.noms$Cluster, sig.noms$surgery)
+dimnames(surg.tab) <- list(
+  group = c("Cluster 1", "Cluster 2", "Cluster 3"),
+  Surgery = c("No", "Yes")
+)
+pairwise.surg <- pairwise_prop_test(surg.tab)
+
+# 5-ASA
+asa.tab <- table(sig.noms$Cluster, sig.noms$ASA_5)
+dimnames(asa.tab) <- list(
+  group = c("Cluster 1", "Cluster 2", "Cluster 3"),
+  ASA = c("No", "Yes")
+)
+pairwise.asa <- pairwise_prop_test(asa.tab)
+
+# Biological
+bio.tab <- table(sig.noms$Cluster, sig.noms$biological)
+dimnames(bio.tab) <- list(
+  group = c("Cluster 1", "Cluster 2", "Cluster 3"),
+  biological = c("No", "Yes")
+)
+pairwise.bio <- pairwise_prop_test(bio.tab)
+
+# Collect p-values
+p.chis  <- c(pairwise.dia$p, pairwise.surg$p, pairwise.asa$p, pairwise.bio$p)
+p.chis.adj <- p.adjust(p.chis, method = "BH")
+names(p.chis.adj) <- c("Diagnosis cluster 1 vs. 2", 
+                       "Diagnosis cluster 1 vs. 3", 
+                       "Diagnosis cluster 2 vs. 3",
+                       "Surgery cluster 1 vs. 2", 
+                       "Surgery cluster 1 vs. 3", 
+                       "Surgery cluster 2 vs. 3",
+                       "5-ASA cluster 1 vs. 2", 
+                       "5-ASA cluster 1 vs. 3", 
+                       "5-ASA cluster 2 vs. 3",
+                       "Biological cluster 1 vs. 2", 
+                       "Biological cluster 1 vs. 3", 
+                       "Biological cluster 2 vs. 3")
+print(p.chis.adj[p.chis.adj < .05])
+```
+
+Kruskal Wallis test over ordinal variable (education)
+
+```{r}
+kruskal.test(Cluster ~ education, data = HL.cat)
+```
